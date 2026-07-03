@@ -1,0 +1,125 @@
+services:
+  app:
+    build:
+      context: .
+      target: app
+    image: data-sync-app:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_CONNECTION: mysql
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_DATABASE: ${DB_DATABASE:-data_sync}
+      DB_USERNAME: ${DB_USERNAME:-data_sync}
+      DB_PASSWORD: ${DB_PASSWORD:-secret}
+      CACHE_STORE: redis
+      QUEUE_CONNECTION: redis
+      REDIS_HOST: redis
+      RUN_MIGRATIONS: "true"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./.env:/var/www/html/.env
+      - storage:/var/www/html/storage
+
+  nginx:
+    build:
+      context: .
+      target: nginx
+    image: data-sync-app-nginx:latest
+    restart: unless-stopped
+    ports:
+      - "8000:80"
+    depends_on:
+      - app
+
+  queue:
+    image: data-sync-app:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_CONNECTION: mysql
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_DATABASE: ${DB_DATABASE:-data_sync}
+      DB_USERNAME: ${DB_USERNAME:-data_sync}
+      DB_PASSWORD: ${DB_PASSWORD:-secret}
+      CACHE_STORE: redis
+      QUEUE_CONNECTION: redis
+      REDIS_HOST: redis
+      RUN_MIGRATIONS: "false"
+    command: php artisan queue:work redis --queue=sync,default --tries=3 --backoff=1,2,4 --max-time=3600
+    depends_on:
+      app:
+        condition: service_started
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./.env:/var/www/html/.env
+      - storage:/var/www/html/storage
+
+  scheduler:
+    image: data-sync-app:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_CONNECTION: mysql
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_DATABASE: ${DB_DATABASE:-data_sync}
+      DB_USERNAME: ${DB_USERNAME:-data_sync}
+      DB_PASSWORD: ${DB_PASSWORD:-secret}
+      CACHE_STORE: redis
+      QUEUE_CONNECTION: redis
+      REDIS_HOST: redis
+      RUN_MIGRATIONS: "false"
+    command: php artisan schedule:work
+    depends_on:
+      app:
+        condition: service_started
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./.env:/var/www/html/.env
+      - storage:/var/www/html/storage
+
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE:-data_sync}
+      MYSQL_USER: ${DB_USERNAME:-data_sync}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-secret}
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-secret}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${DB_PASSWORD:-secret}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  mysql:
+  storage:
