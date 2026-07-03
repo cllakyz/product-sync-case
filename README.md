@@ -68,14 +68,19 @@ kapalıdır; uygulamayı `docker compose up -d --build` ile başlatın.
 ## Test
 
 ```bash
-# Docker
-docker compose exec app php artisan test --compact
+# İlk kurulumdan sonra dev bağımlılıkları yerelde hazır olmalı
+composer install
+npm ci
 
-# Coverage (imajda pcov kurulu)
-docker compose exec app php artisan test --coverage --min=70
-
-# Yerel test runner (ayrı SQLite test veritabanı her çalıştırmada sıfırlanır)
+# PHPUnit suite
 php artisan test --compact
+
+# Hedefli test dosyası veya filtre
+php artisan test --compact tests/Feature/ExampleTest.php
+php artisan test --compact --filter=testName
+
+# Coverage (pcov veya Xdebug gerekir)
+php artisan test --coverage --min=70
 ```
 
 90 test; unit (hash, delta, circuit breaker, rate limiter) + feature (provider mapping, orchestrator
