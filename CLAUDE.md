@@ -4,9 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-A Laravel 13 application using the **React starter kit**: Inertia.js v3 for server-driven SPA routing, Fortify for authentication, Tailwind v4, and Wayfinder for type-safe route/action generation in TypeScript. Laravel Boost is installed for AI-assisted development (MCP tools, docs search).
+A fault-tolerant **product synchronization system**: it periodically pulls product catalogues from third-party supplier APIs (DummyJSON, FakeStore), detects changes via **hash-based delta sync**, runs the work asynchronously on queues with **retry + exponential backoff + a dead letter queue**, and exposes status through a REST API and an Inertia/React dashboard. The reference design lives in `SPEC.md` (full technical spec, in Turkish) and `PLAN.md` (decisions); the sync code is cross-referenced back to SPEC section numbers (e.g. "SPEC §6.3", "E18") — treat those as the source of truth for intended behaviour.
+
+The scaffolding is Laravel's **React starter kit**: Inertia.js v3 for server-driven SPA routing, Fortify for authentication, Tailwind v4, Sanctum for API tokens, and Wayfinder for type-safe route/action generation in TypeScript. Laravel Boost is installed for AI-assisted development (MCP tools, docs search).
 
 ## Commands
+
+Setup / Docker:
+- `composer run setup` — one-shot local bootstrap (install, `.env`, key, migrate, npm build).
+- `docker compose up` — full containerized stack: `app` (php-fpm), `nginx`, dedicated `queue` worker, `scheduler`, `mysql`, `redis`. Use this to exercise the real async path (separate worker + scheduler), which `composer run dev` does not fully reproduce.
+
+Sync engine:
+- `php artisan sync:dispatch` — queue a sync for every enabled provider (what the scheduler runs every `SYNC_INTERVAL_MINUTES`). Scope with `--provider=dummyjson|fakestore`.
 
 Backend (PHP):
 - `composer run dev` — run the full dev stack concurrently (`php artisan serve`, queue listener, `pail` log tailer, `vite`). This is the standard way to run the app locally.
@@ -27,6 +36,24 @@ Frontend (JS/TS), via npm:
 Tests are PHPUnit (not Pest) — see `tests/Unit` and `tests/Feature`; the suite runs against an in-memory SQLite DB (`phpunit.xml`).
 
 ## Architecture
+
+### Sync engine (`app/Sync/**`, `app/Jobs/`)
+
+This is the core of the project; the Laravel starter-kit pieces below are just the shell around it.
+
+- **Pipeline**: `SyncDispatcher` (creates a pending `SyncLog`, refuses a second active run per provider) → `SyncProviderJob` (`ShouldBeUnique`, `onQueue('sync')`, retried with exponential backoff, dead-lettered after the last attempt) → `SyncOrchestrator` (acquires a per-provider Redis lock, drives one run end to end, records the outcome on the `SyncLog`) → `DeltaSyncService` (applies the provider's product stream to the local catalogue) → a `ProductProvider` adapter.
+- **Delta sync**: `ProductHasher` hashes each normalized product; only records whose hash changed are updated. New records are inserted, previously soft-deleted ones are restored, and products the provider no longer returns are soft-deleted — **except** a mass-deletion guard (`sync.delete_guard_ratio`, SPEC E18) cancels the deletion pass and marks the run partial if it would remove too much of the catalogue (protects against a provider outage). Idempotency comes from the `(provider_type, external_id)` unique key inside a transaction.
+- **Resilience services** (`app/Sync/Services/`): `CircuitBreaker` trips after N consecutive request failures and skips the provider during a cooldown; `RateLimiter` spaces outbound requests to stay under `max_requests_per_second`; `SyncHttpClient` retries request-level 429/5xx with backoff; `DeadLetterService` parks jobs that exhaust their tries (retriable via the API); `AlertManager` emits debounced structured-log alerts (failure streaks, DLQ size, queue backlog).
+- **Providers**: implement `app/Sync/Contracts/ProductProvider` (which streams `ProductData` DTOs lazily so the full catalogue is never held in memory) and register the class in `config/sync.php` under `providers`. `AbstractHttpProvider` gives you the HTTP/paging plumbing; `ProviderRegistry` resolves enabled providers. Adding a provider = one class + one config entry, no engine changes.
+- **Config is the control surface**: nearly all engine behaviour (interval, RPS, tries/backoff, breaker thresholds, delete guard, missing-stock policy, alert thresholds, API throttles) is env-driven through `config/sync.php` — read it before changing tuning, and prefer adding config over hardcoding.
+- **State models**: `SyncLog` (one row per run: status/trigger/metrics), `Product` (the synced catalogue, soft-deletes), `DeadLetterJob`, `SyncAlert`. Enums in `app/Enums/` (`SyncStatus`, `TriggerType`, `ProviderType`, `DeadLetterStatus`, `AlertType`) are the canonical vocabulary.
+
+### REST API (`routes/api.php`, `app/Http/Controllers/Api/`)
+
+- Sanctum-authenticated (`auth:sanctum`) except the public `GET /api/health` probe. Read endpoints (`sync/status`, `sync/history`, `sync/failed-jobs`, `products`) use the default throttle; state-changing `POST sync/trigger` and `POST sync/retry/{jobId}` use a stricter throttle because they enqueue real work. Both throttle rates come from `config('sync.throttle.*')`.
+- Responses go through `app/Http/Resources/*` and `app/Support/ApiResponse`; request validation (including allow-listed sort/filter fields) lives in `app/Http/Requests/Api/*`. The sync dashboard page is `resources/js/pages/sync/dashboard.tsx`.
+
+### Starter-kit shell
 
 - **Routing**: Inertia pages are wired directly in `routes/*.php` via `Route::inertia(...)` for static pages, or standard controller routes for pages needing server logic. `routes/web.php` is the entrypoint and pulls in `routes/settings.php`. There is no `routes/api.php` yet.
 - **Auth**: Handled by Fortify (`app/Providers/FortifyServiceProvider.php`), not a hand-rolled auth controller — Fortify actions live under Laravel's own package, and views are overridden via Inertia pages in `resources/js/pages/auth/`. Passkey support is present (`@laravel/passkeys`, `.well-known/passkey-endpoints` route in `routes/settings.php`).
@@ -50,12 +77,12 @@ This application is a Laravel application and its main Laravel ecosystems packag
 - inertiajs/inertia-laravel (INERTIA_LARAVEL) - v3
 - laravel/fortify (FORTIFY) - v1
 - laravel/framework (LARAVEL) - v13
+- laravel/mcp (MCP) - v0
 - laravel/prompts (PROMPTS) - v0
 - laravel/sanctum (SANCTUM) - v4
 - laravel/wayfinder (WAYFINDER) - v0
 - larastan/larastan (LARASTAN) - v3
 - laravel/boost (BOOST) - v2
-- laravel/mcp (MCP) - v0
 - laravel/pail (PAIL) - v1
 - laravel/pint (PINT) - v1
 - laravel/sail (SAIL) - v1
@@ -143,7 +170,7 @@ This project has domain-specific skills available in `**/skills/**`. You MUST ac
 - Always use curly braces for control structures, even for single-line bodies.
 - Use PHP 8 constructor property promotion: `public function __construct(public GitHub $github) { }`. Do not leave empty zero-parameter `__construct()` methods unless the constructor is private.
 - Use explicit return type declarations and type hints for all method parameters: `function isAccessible(User $user, ?string $path = null): bool`
-- Use TitleCase for Enum keys: `FavoritePerson`, `BestLake`, `Monthly`.
+- Follow existing application Enum naming conventions.
 - Prefer PHPDoc blocks over inline comments. Only add inline comments for exceptionally complex logic.
 - Use array shape type definitions in PHPDoc blocks.
 
