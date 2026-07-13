@@ -5,7 +5,6 @@ services:
       target: app
     image: data-sync-app:latest
     restart: unless-stopped
-    env_file: .env
     environment:
       DB_CONNECTION: mysql
       DB_HOST: mysql
@@ -40,7 +39,6 @@ services:
   queue:
     image: data-sync-app:latest
     restart: unless-stopped
-    env_file: .env
     environment:
       DB_CONNECTION: mysql
       DB_HOST: mysql
@@ -67,7 +65,6 @@ services:
   scheduler:
     image: data-sync-app:latest
     restart: unless-stopped
-    env_file: .env
     environment:
       DB_CONNECTION: mysql
       DB_HOST: mysql
